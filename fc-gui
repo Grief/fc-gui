@@ -1,0 +1,133 @@
+#!/usr/bin/env python3.5
+import argparse, functools, os, subprocess, sys, tempfile
+
+from PyQt5.QtCore import QFile, QIODevice
+from PyQt5.QtGui import QImage, QPainter, QPixmap
+from PyQt5.QtWidgets import QApplication, QWidget, QScrollArea, QLabel, QGroupBox
+from PyQt5.QtWebKitWidgets import QWebView
+from PyQt5.QtWidgets import QCheckBox, QHBoxLayout, QVBoxLayout
+
+from os.path import join as join_path
+
+RENDER_ARG = '--render'
+
+
+def render():
+    view = QWebView()
+    view.setHtml(''.join(sys.stdin.readlines()))
+    table = view.page().mainFrame().findFirstElement('table')
+    image = QImage(table.geometry().size(), QImage.Format_ARGB32)
+    painter = QPainter(image)
+    table.render(painter)
+    painter.end()
+    stdout = QFile()
+    stdout.open(1, QIODevice.WriteOnly)
+    image.save(stdout, 'png')
+
+
+def preview(state):
+    html = '''
+    <head>
+    <style>
+        table:nth-child(1) {
+        background-color: white;
+        color:black;
+        font-size: 18px;
+        }
+    </style>
+    </head>
+    <body>
+      <table>
+      <tr><td>The quick brown fox jumps over the lazy dog.</td></tr>
+      <tr><td>съешь ещё этих мягких французских булок, да выпей чаю</td><tr>
+      </table>
+    </body>
+    '''
+    with tempfile.TemporaryDirectory() as d:
+        fontconfig = join_path(d, 'fontconfig')
+        os.makedirs(join_path(fontconfig, 'conf.d'))
+        os.symlink('/etc/fonts/fonts.conf', join_path(fontconfig, 'fonts.conf'))
+        for conf in state:
+            if conf.enabled: os.symlink(conf.path, join_path(fontconfig, 'conf.d', conf.name))
+
+        env = {k: v for k, v in os.environ.items()}
+        env['XDG_CONFIG_HOME'] = d
+        x = subprocess.run([sys.argv[0], RENDER_ARG], input=html.encode(), env=env, stdout=subprocess.PIPE).stdout
+        return x
+
+
+class Conf:
+    def __init__(self, path, name, enabled, broken): self.path, self.name, self.enabled, self.broken = path, name, enabled, broken
+
+    def __lt__(self, other): return self.name < other.name
+
+
+def load_state():
+    os.chdir('/etc/fonts/conf.d')
+    entries, paths = [], set()
+    for name in os.listdir('.'):
+        path = os.path.realpath(name)
+        paths.add(path)
+        entries.append(Conf(path, name, True, False))
+    avail = '/etc/fonts/conf.avail'
+    os.chdir(avail)
+    for name in os.listdir('.'):
+        path = join_path(avail, name)
+        if path in paths: continue
+        entries.append(Conf(path, name, False, False))
+
+    entries.sort()
+    return entries
+
+
+class Example(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.state = load_state()
+
+        self.label = QLabel()
+        self.preview = QPixmap()
+
+        self.update(None, None)
+
+        hbox = QHBoxLayout(self)
+
+        self.checkboxes = QGroupBox('conf.d')
+        scroll = QScrollArea()
+
+        hbox.addWidget(scroll)
+        hbox.addWidget(self.label)
+
+        vbox = QVBoxLayout()
+        scroll.setWidget(self.checkboxes)
+        scroll.setWidgetResizable(True)
+
+        self.checkboxes.setLayout(vbox)
+
+        for i, conf in enumerate(self.state):
+            label = conf.name
+            check = QCheckBox(label)
+            if conf.enabled: check.setChecked(True)
+            vbox.addWidget(check)
+
+            check.stateChanged.connect(functools.partial(self.update, i, check))
+
+        self.show()
+
+    def update(self, index, check):
+        if index is not None:
+            self.state[index].enabled = check.isChecked()
+        self.preview.loadFromData(preview(self.state))
+        self.label.setPixmap(self.preview)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument(RENDER_ARG, action='store_true', help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    app = QApplication(sys.argv)
+    if args.render: render()
+    else:
+        ex = Example()
+        sys.exit(app.exec_())
